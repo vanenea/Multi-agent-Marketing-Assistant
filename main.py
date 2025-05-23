@@ -7,7 +7,8 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-
+from http import HTTPStatus
+from dashscope import Application
 load_dotenv()
 
 
@@ -24,15 +25,6 @@ class LLMAgent(Agent):
         self.model_name = model_name
 
     def call_llm(self, prompt: str) -> str:
-        # response = openai.ChatCompletion.create(
-        #     model=self.model_name,
-        #     messages=[{'role': 'system', 'content': 'You are a helpful marketing assistant.'},
-        #               {'role': 'user', 'content': prompt}],
-        #     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        #     api_key=os.getenv("DASHSCOPE_API_KEY"),
-        #     max_tokens=300,
-        #     temperature=0.7
-        # )
         chat = ChatOpenAI(
             api_key=os.getenv("DASHSCOPE_API_KEY"),
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -40,7 +32,6 @@ class LLMAgent(Agent):
             temperature=0.7,
             verbose=True
         )
-
         messages = [
             {"role": "system", "content": "You are a helpful marketing assistant."},
             {"role": "user", "content": prompt}
@@ -51,62 +42,26 @@ class LLMAgent(Agent):
 
 # 信息采集 Agent
 class InformationCollectorAgent(Agent):
-    def __init__(self, weibo_token: str = None, xhs_token: str = None):
-        self.weibo_token = weibo_token or os.getenv('WEIBO_ACCESS_TOKEN')
-        self.xhs_token = xhs_token or os.getenv('XHS_ACCESS_TOKEN')
+    def __init__(self, ali_token: str = None):
+        self.ali_token = ali_token or os.getenv('DASHSCOPE_API_KEY')
 
-    def fetch_weibo(self, keyword: str, count: int = 10) -> list:
-        """
-        示例：调用微博搜索 API，返回最新微博列表
-        """
-        url = 'https://api.weibo.com/2/search/topics.json'
-        params = {
-            'access_token': self.weibo_token,
-            'q': keyword,
-            'count': count
-        }
-        resp = requests.get(url, params=params)
-        items = []
-        if resp.status_code == 200:
-            data = resp.json()
-            topics = data.get('topics', [])
-            for t in topics:
-                items.append({'source': 'weibo', 'text': t.get('trend_name'), 'timestamp': t.get('trend_time')})
-        return items
-
-    def fetch_xiaohongshu(self, keyword: str, count: int = 10) -> list:
-        """
-        示例：调用小红书搜索 API，返回笔记列表
-        """
-        url = 'https://www.xiaohongshu.com/fe_api/burdock/weixin/v2/search/notes'
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        params = {
-            'keyword': keyword,
-            'page_size': count,
-            'page': 1
-        }
-        if self.xhs_token:
-            headers['Authorization'] = f'Bearer {self.xhs_token}'
-        resp = requests.get(url, headers=headers, params=params)
-        items = []
-        if resp.status_code == 200:
-            notes = resp.json().get('data', [])
-            for n in notes:
-                items.append({'source': 'xiaohongshu', 'text': n.get('desc'), 'timestamp': n.get('time')})
-        return items
 
     def run(self, context: dict) -> dict:
         keyword = context.get('product', '')
-        # 从微博和小红书抓取数据
-        weibo_data = self.fetch_weibo(keyword, count=20)
-        xhs_data = self.fetch_xiaohongshu(keyword, count=20)
-        # 合并与时间排序
-        combined = weibo_data + xhs_data
-        combined.sort(key=lambda x: x['timestamp'], reverse=True)
-        context['data'] = combined
-        # 延迟以防 API 限制
-        time.sleep(1)
-        return context
+        response = Application.call(
+            api_key=self.ali_token,
+            app_id='ef8118d15105460297c03d8bffc3552f',  # 替换为实际的应用 ID
+            prompt=f'根据用户提供的产品{keyword}, 然后抓取社交媒体、新闻、竞品网站等数据, 然后对数据做一个汇总')
+
+        if response.status_code != HTTPStatus.OK:
+            print(f'request_id={response.request_id}')
+            print(f'code={response.status_code}')
+            print(f'message={response.message}')
+            print(f'请参考文档：https://help.aliyun.com/zh/model-studio/developer-reference/error-code')
+        else:
+            #print(response.output.text)
+            context['data'] = response.output.text
+            return context
 
 
 # 策略规划 Agent（基于大模型）
@@ -130,8 +85,12 @@ class ContentGeneratorAgent(LLMAgent):
     def run(self, context: dict) -> dict:
         product = context.get('product')
         audience = context.get('audience', '潜在用户')
+        data = context.get('data')
+        strategy = context.get('strategy')
         prompt = (
-            f"请为以下产品撰写推广文案，面向{audience}：\n"
+            f"信息采集，抓取社交媒体、新闻、竞品网站等数据，数据如下：{data}：\n"
+            f"根据目标与预算，制定营销策略／关键动作序列，数据如下：{strategy}：\n"
+            f"然后请为以下产品撰写推广文案，面向{audience}：\n"
             f"产品：{product}\n"
             f"要求：简洁、有吸引力，包含行动号召。"
         )
@@ -150,7 +109,7 @@ class ExecutionAgent(Agent):
 # 多智能体营销助手
 class MarketingAssistant:
     def __init__(self, excel_path: str, model_name: str = 'gpt-3.5-turbo'):
-        self.excel_path = excel_path
+        #self.excel_path = excel_path
         self.agents = [
             InformationCollectorAgent(),
             StrategyPlannerAgent(model_name),
@@ -159,8 +118,9 @@ class MarketingAssistant:
         ]
 
     def select_product(self) -> str:
-        df = pd.read_excel(self.excel_path)
-        return random.choice(df['产品名称'].tolist())
+        #df = pd.read_excel(self.excel_path)
+        #return random.choice(df['产品名称'].tolist())
+        return "小米手机15"
 
     def run(self, goal: str = None, budget: str = None, audience: str = None) -> dict:
         product = self.select_product()
@@ -179,11 +139,20 @@ class MarketingAssistant:
 
 
 if __name__ == '__main__':
-    # assistant = MarketingAssistant('products.xlsx', model_name='gpt-4')
-    # result = assistant.run(goal='提高社交媒体关注度', budget='2000', audience='年轻人')
-    # print(result)
-    ifca = InformationCollectorAgent()
-    ifca.run()
-    cga = ContentGeneratorAgent()
-    llm = cga.run({'product': '手机', 'goal': '提高社交媒体关注度', 'budget': '2000', 'audience': '年轻人'})
-    print(llm)
+    model_name = 'qwen-plus-latest'
+    assistant = MarketingAssistant('products.xlsx', model_name)
+    result = assistant.run(goal='提高社交媒体关注度', budget='2000', audience='年轻人')
+    print(result)
+    #prompt ={'product': '小米手机15', 'goal': '提高社交媒体关注度', 'budget': '5000', 'audience': '年轻人'}
+
+    # ifca = InformationCollectorAgent()
+    # context=ifca.run(prompt)
+    # print(context)
+
+    # sga = StrategyPlannerAgent(model_name)
+    # llm = sga.run(prompt)
+    # print(llm)
+
+    # cga = ContentGeneratorAgent()
+    # cgc = cga.run(prompt)
+    # print(cgc)
